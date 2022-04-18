@@ -145,6 +145,10 @@ gdb_shutting_down = False
 gdb_process = None
 gdb_server_process = None
 gdb_threads = []
+
+gdb_wait_threads = []
+gdb_wait_threads_done = []
+gdb_wait_threadlock = threading.Lock()
 gdb_stack_frame = None
 gdb_stack_index = 0
 
@@ -1411,17 +1415,22 @@ class GDBBreakpoint(object):
 
     def add(self):
         if is_running():
-            res = wait_until_stopped()
-            self.insert()
-            if res:
-                resume()
+            exec_after_stopped(self.add_aftermath)
+
+    def add_aftermath(self, res):
+        self.insert()
+        if res:
+            resume()
+
 
     def remove(self):
         if is_running():
-            res = wait_until_stopped()
-            run_cmd("-break-delete %s" % self.number)
-            if res:
-                resume()
+            exec_after_stopped(self.remove_aftermath)
+
+    def remove_aftermath(self, res):
+        run_cmd("-break-delete %s" % self.number)
+        if res:
+            resume()
 
     def format(self):
         return "%d - %s:%d\n" % (self.number, self.filename, self.line)
@@ -1706,19 +1715,58 @@ def run_python_cmd(cmd, block=False, timeout=None):
     return count
 
 
-def wait_until_stopped():
-    if gdb_run_status == "running":
-        result = run_cmd("-exec-interrupt --all", True)
-        if "^done" in result:
-            i = 0
-            while not "stopped" in gdb_run_status and i < 100:
-                i = i + 1
-                time.sleep(0.1)
-            if i >= 100:
-                log_debug("I'm confused... I think status is %s, but it seems it wasn't..." % gdb_run_status)
-                return False
-            return True
-    return False
+def exec_after_stopped(afterfunc):
+    def wait_thread(afterfunc):
+        global gdb_run_status
+        global gdb_wait_threads
+        global gdb_wait_threadlock
+        global gdb_wait_threads_done
+
+        if gdb_run_status == "running":
+            result = run_cmd("-exec-interrupt --all", True)
+            if "^done" in result:
+                i = 0
+                while not "stopped" in gdb_run_status and i < 100:
+                    i = i + 1
+                    time.sleep(0.1)
+                if i >= 100:
+                    log_debug("I'm confused... I think status is %s, but it seems it wasn't..." % gdb_run_status)
+                    afterfunc(False)
+                    # append is thread safe
+                    gdb_wait_threads_done.append(gdb_wait_threads.pop(0))
+                    gdb_wait_threadlock.acquire()
+                    if len(gdb_wait_threads) > 0:
+                        gdb_wait_threads[0].start()
+                    gdb_wait_threadlock.release()
+                    return None
+                afterfunc(True)
+                gdb_wait_threads_done.append(gdb_wait_threads.pop(0))
+                gdb_wait_threadlock.acquire()
+                if len(gdb_wait_threads) > 0:
+                    gdb_wait_threads[0].start()
+                gdb_wait_threadlock.release()
+                return None
+        afterfunc(False)
+        # append is thread safe, call next pending thread and add this one to the joinable ones
+        gdb_wait_threads_done.append(gdb_wait_threads.pop(0))
+        gdb_wait_threadlock.acquire()
+        if len(gdb_wait_threads) > 0:
+            gdb_wait_threads[0].start()
+        gdb_wait_threadlock.release()
+        return None
+    t = threading.Thread(target=wait_thread, args=(afterfunc,))
+    gdb_wait_threadlock.acquire()
+    if len(gdb_wait_threads) == 0:  
+        gdb_wait_threads.append(t)
+        t.start()
+    else:
+        gdb_wait_threads.append(t)
+    gdb_wait_threadlock.release()
+
+    #clean up done threads
+    while gdb_wait_threads_done:
+        gdb_wait_threads_done.pop(0).join()
+
 
 
 def resume():
@@ -1890,6 +1938,10 @@ def cleanup():
     for t in gdb_threads:
         t.join(get_setting("gdb_timeout", 20))
     gdb_threads = []
+
+    #clean up done threads
+    while gdb_wait_threads_done:
+        gdb_wait_threads_done.pop(0).join(get_setting("gdb_timeout", 20))
 
     # unset the process variable to make sure all pipes and other OS objects are
     # released (this fixes different freezes when gdb is started multiple times)
@@ -2260,7 +2312,9 @@ class GdbExit(sublime_plugin.WindowCommand):
     def run(self):
         global gdb_shutting_down
         gdb_shutting_down = True
-        wait_until_stopped()
+        exec_after_stopped(self.aftermath)
+
+    def aftermath(self, unused):
         run_cmd("-gdb-exit", True)
         if gdb_server_process:
             gdb_server_process.terminate()
