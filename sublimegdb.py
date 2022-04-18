@@ -620,6 +620,7 @@ class GDBMemDump:
         self.data = {}
         self.oldata = {}
         self.children = []
+        self.update_value()
 
     def delete(self):
         self.deleted = True
