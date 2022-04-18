@@ -1714,14 +1714,14 @@ def run_python_cmd(cmd, block=False, timeout=None):
             gdb_python_command_running = False
     return count
 
-
+# this prevents the sublime GUI from hanging while waiting for the debugger to finish its tasks
+# once a thread is done, check if we can run the next task and clean up old threads
 def exec_after_stopped(afterfunc):
     def wait_thread(afterfunc):
         global gdb_run_status
         global gdb_wait_threads
         global gdb_wait_threadlock
         global gdb_wait_threads_done
-
         if gdb_run_status == "running":
             result = run_cmd("-exec-interrupt --all", True)
             if "^done" in result:
@@ -1755,6 +1755,8 @@ def exec_after_stopped(afterfunc):
         gdb_wait_threadlock.release()
         return None
     t = threading.Thread(target=wait_thread, args=(afterfunc,))
+
+    # the lock prevents the function from falling into a "hole" where a new task is acutally due but no one runs it.
     gdb_wait_threadlock.acquire()
     if len(gdb_wait_threads) == 0:  
         gdb_wait_threads.append(t)
@@ -2142,6 +2144,9 @@ class GdbLaunch(sublime_plugin.WindowCommand):
         global gdb_bkp_view
         global gdb_bkp_layout
         global gdb_shutting_down
+        global gdb_wait_threads
+        global gdb_wait_threadlock
+        global gdb_wait_threads_done
         global DEBUG
         global DEBUG_FILE
         view = self.window.active_view()
@@ -2269,6 +2274,15 @@ It seems you're not running gdb with the "mi" interpreter. Please add
                 run_cmd(attach_cmd, block=True, timeout=get_setting("gdb_timeout", 20))
 
             gdb_breakpoint_view.sync_breakpoints()
+
+            #clear up all threads, we don't want any of them running when we actually start GDB
+            while gdb_wait_threads:
+                time.sleep(0.1)
+            while gdb_wait_threads_done:
+                gdb_wait_threadlock.acquire()
+                done_thread = gdb_wait_threads_done.pop(0)
+                gdb_wait_threadlock.release()
+                done_thread.join()
 
             if(get_setting("run_after_init", True)):
                 gdb_run_status = "running"
