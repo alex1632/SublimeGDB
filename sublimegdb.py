@@ -1337,10 +1337,17 @@ class GDBDisassemblyView(GDBView):
 
 class GDBBreakpoint(object):
     def __init__(self, filename="", line=0, addr=""):
-        self.original_filename = normalize(filename)
+        if get_setting("attach_cmd", False):
+            project_folder = sublime.active_window().project_data()["folders"][0]["path"]
+            self.original_filename = normalize(filename)
+            self.original_br = os.path.relpath(filename, start=project_folder)
+        else:
+            self.original_filename = normalize(filename)
+            self.original_br = self.original_filename
         self.original_line = line
         self.addr = addr
         self.modified_line = None
+        self.modified_br = None
         self.clear()
         self.add()
 
@@ -1366,7 +1373,9 @@ class GDBBreakpoint(object):
         if self.modified_line and not is_running():
             # the next GDB runs we will use the modified line
             self.original_line = self.modified_line
+            self.original_br = self.modified_br
             self.modified_line = None
+            self.modified_br = None
 
     def breakpoint_added(self, res):
         if "bkpt" not in res:
@@ -1398,7 +1407,7 @@ class GDBBreakpoint(object):
         if self.addr != "":
             cmd = "%s *%s" % (break_cmd, self.addr)
         else:
-            cmd = "%s \"\\\"%s\\\":%d\"" % (break_cmd, self.original_filename.replace("\\", "/"), self.original_line)
+            cmd = "%s \"\\\"%s\\\":%d\"" % (break_cmd, self.original_br.replace("\\", "/"), self.original_line)
         out = run_cmd(cmd, True)
         if get_result(out) == "error":
             return
@@ -1809,7 +1818,10 @@ def update_cursor():
     gdb_stack_index = int(currFrame["level"])
 
     if "fullname" in currFrame:
-        gdb_cursor = currFrame["fullname"]
+        if get_setting("attach_cmd", False):
+            gdb_cursor = os.path.join(sublime.active_window().project_data()["folders"][0]["path"], os.path.relpath(currFrame["file"], start=get_setting("buildpath_prefix", "")))
+        else:
+            gdb_cursor = currFrame["fullname"]
         gdb_cursor_position = int(currFrame["line"])
         sublime.active_window().focus_group(get_setting("file_group", 0))
 
